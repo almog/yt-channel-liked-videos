@@ -10,6 +10,7 @@ channel<TAB>title<TAB>url
 
 Options:
   -b browser         Browser to read YouTube cookies from. Default: firefox
+  -r                 Refresh the liked-videos cache before searching
 
 Examples:
   ./liked-by-channel 3blue1brown
@@ -19,12 +20,16 @@ EOF
 }
 
 browser=firefox
+refresh=false
+cache_dir=.cache
+liked_cache=$cache_dir/liked-videos.json
 
 # Parse a deliberately small option set. The channel handle itself stays as the
 # single positional argument so there is no fuzzy display-name search path.
-while getopts "b:h" opt; do
+while getopts "b:rh" opt; do
   case "$opt" in
     b) browser=$OPTARG ;;
+    r) refresh=true ;;
     h)
       usage
       exit 0
@@ -114,20 +119,31 @@ resolved_channel_url=$(printf '%s' "$channel_tsv" | cut -f3)
 # sort, fzf, a file, or another jq/awk step.
 echo "Resolved channel: $resolved_channel_name ($channel_id)" >&2
 echo "Channel URL: $resolved_channel_url" >&2
-echo "Fetching liked videos..." >&2
 
-# Fetch the authenticated user's Liked Videos playlist only after the channel
-# has been resolved, then filter by channel_id. Filtering by ID is more stable
-# than filtering by display name because names can differ in case, spacing, or
-# change over time.
-yt-dlp \
-  --cookies-from-browser "$browser" \
-  --dump-single-json \
-  --flat-playlist \
-  "https://www.youtube.com/playlist?list=LL" |
-  jq -r --arg channel_id "$channel_id" '
+# Fetch the authenticated user's Liked Videos playlist only when there is no
+# cache, or when the user explicitly asks for a refresh. The cache is deliberately
+# not keyed by browser or account; use -r after changing accounts or likes.
+if [ "$refresh" = "true" ] || ! [ -s "$liked_cache" ]; then
+  mkdir -p "$cache_dir"
+  tmp_cache=$liked_cache.tmp
+
+  echo "Fetching liked videos..." >&2
+  yt-dlp \
+    --cookies-from-browser "$browser" \
+    --dump-single-json \
+    --flat-playlist \
+    "https://www.youtube.com/playlist?list=LL" >"$tmp_cache"
+  mv "$tmp_cache" "$liked_cache"
+  echo "Cached liked videos in $liked_cache" >&2
+else
+  echo "Using cached liked videos from $liked_cache" >&2
+fi
+
+# Filter by channel_id. This is more stable than filtering by display name
+# because names can differ in case, spacing, or change over time.
+jq -r --arg channel_id "$channel_id" '
     .entries[]
     | select(.channel_id == $channel_id)
     | [(.channel // ""), (.title // ""), (.url // "")]
     | @tsv
-  '
+  ' "$liked_cache"

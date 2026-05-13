@@ -29,6 +29,12 @@ With a different browser:
 ./liked-by-channel -b chrome KnottingKnots
 ```
 
+Refresh the liked-videos cache:
+
+```sh
+./liked-by-channel -r KnottingKnots
+```
+
 ## Output
 
 Output is TSV on stdout:
@@ -42,6 +48,26 @@ Status messages are written to stderr, so stdout can be redirected or piped:
 ```sh
 ./liked-by-channel KnottingKnots > knotting_knots.tsv
 ./liked-by-channel KnottingKnots | fzf
+```
+
+## Cache
+
+The first successful run fetches your full Liked Videos playlist and writes it
+to:
+
+```text
+.cache/liked-videos.json
+```
+
+Later runs reuse that file, so searching for another channel does not fetch all
+liked videos again. The cache is intentionally simple: it is not keyed by
+browser, YouTube account, or target channel.
+
+Use `-r` to refresh the cache after changing accounts, changing browsers, or
+liking/unliking videos:
+
+```sh
+./liked-by-channel -r 3blue1brown
 ```
 
 ## Handle-Only Input
