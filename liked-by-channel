@@ -1,0 +1,133 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: ./liked-by-channel [-b browser] HANDLE_OR_HANDLE_URL
+
+Print liked videos from the exact YouTube channel handle as TSV:
+channel<TAB>title<TAB>url
+
+Options:
+  -b browser         Browser to read YouTube cookies from. Default: firefox
+
+Examples:
+  ./liked-by-channel 3blue1brown
+  ./liked-by-channel @3blue1brown
+  ./liked-by-channel https://www.youtube.com/@3blue1brown
+EOF
+}
+
+browser=firefox
+
+# Parse a deliberately small option set. The channel handle itself stays as the
+# single positional argument so there is no fuzzy display-name search path.
+while getopts "b:h" opt; do
+  case "$opt" in
+    b) browser=$OPTARG ;;
+    h)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+done
+shift "$((OPTIND - 1))"
+
+if [ "$#" -ne 1 ]; then
+  usage
+  exit 2
+fi
+
+handle_input=$1
+
+# Accept a bare handle, @handle, or youtube.com/@handle. Do not accept display
+# names with spaces or other non-handle characters: handles are unique, while
+# display names are not.
+case "$handle_input" in
+  http://www.youtube.com/@* | https://www.youtube.com/@* | http://youtube.com/@* | https://youtube.com/@*)
+    handle_path=${handle_input#*youtube.com/}
+    handle=${handle_path%%[/?#]*}
+    ;;
+  @*)
+    handle=${handle_input%%[/?#]*}
+    ;;
+  *)
+    handle="@${handle_input%%[/?#]*}"
+    ;;
+esac
+
+case "$handle" in
+  @ | *[!A-Za-z0-9_.@-]*)
+    echo "Invalid YouTube handle: $handle_input" >&2
+    exit 2
+    ;;
+esac
+
+case "${handle#@}" in
+  *@*)
+    echo "Invalid YouTube handle: $handle_input" >&2
+    exit 2
+    ;;
+esac
+
+channel_url="https://www.youtube.com/$handle"
+
+# Resolve the handle before fetching the private liked-video playlist. This
+# first yt-dlp call is only a direct, public channel-page request; it does not
+# touch the authenticated LL playlist. The expensive full liked-video fetch
+# happens later only if the handle resolves to a channel_id.
+channel_json=$(
+  yt-dlp \
+    --flat-playlist \
+    --dump-single-json \
+    --playlist-end 1 \
+    "$channel_url"
+)
+
+# Require yt-dlp to return a channel_id for the exact handle URL. That channel
+# ID is the stable value used to filter liked videos.
+channel_tsv=$(
+  printf '%s' "$channel_json" |
+    jq -er '
+      [
+        .channel_id,
+        (.channel // .uploader // .title),
+        (.channel_url // .uploader_url // .webpage_url)
+      ]
+      | select(.[0] != null and .[0] != "")
+      | @tsv
+    '
+) || {
+  echo "Could not resolve YouTube handle to a channel_id: $handle" >&2
+  exit 1
+}
+
+channel_id=$(printf '%s' "$channel_tsv" | cut -f1)
+resolved_channel_name=$(printf '%s' "$channel_tsv" | cut -f2)
+resolved_channel_url=$(printf '%s' "$channel_tsv" | cut -f3)
+
+# Status messages go to stderr so stdout remains clean TSV that can be piped to
+# sort, fzf, a file, or another jq/awk step.
+echo "Resolved channel: $resolved_channel_name ($channel_id)" >&2
+echo "Channel URL: $resolved_channel_url" >&2
+echo "Fetching liked videos..." >&2
+
+# Fetch the authenticated user's Liked Videos playlist only after the channel
+# has been resolved, then filter by channel_id. Filtering by ID is more stable
+# than filtering by display name because names can differ in case, spacing, or
+# change over time.
+yt-dlp \
+  --cookies-from-browser "$browser" \
+  --dump-single-json \
+  --flat-playlist \
+  "https://www.youtube.com/playlist?list=LL" |
+  jq -r --arg channel_id "$channel_id" '
+    .entries[]
+    | select(.channel_id == $channel_id)
+    | [(.channel // ""), (.title // ""), (.url // "")]
+    | @tsv
+  '
